@@ -6,11 +6,14 @@
   · 番茄工作法循环：专注 → 短休息 → … → 每 4 个番茄进入长休息
   · 深色 / 浅色（黑 / 白）主题一键切换，极简高级风格（单色设计）
   · 专注 / 短休 / 长休时长可调
-  · 待办事项管理
-  · 今日与近 7 天专注统计（纯 tkinter 绘制，无第三方依赖）
+  · 每次专注前选择一项待办任务，自动记录该任务的学习时长
+  · 计时页可一键「完成待办」（按钮 + Ctrl+Enter 快捷键），提前结束时记录已用时长
+  · 待办事项管理（列表显示每项已累计的专注时长）
+  · 统计：今日 / 累计数据、近 7 天柱状图、每项任务时长环形图
+    （纯 tkinter 绘制，无第三方依赖）
 
 运行：python pomodoro.py
-快捷键：空格 开始 / 暂停
+快捷键：空格 开始 / 暂停 · Ctrl+Enter 完成待办
 """
 
 import json
@@ -46,6 +49,8 @@ THEMES = {
         "primary_fg": "#0C0C0E",
         "primary_hover": "#D9D9DC",
         "sel_bg": "#26262B",
+        "pie_colors": ["#F5F5F6", "#C6C6CC", "#9999A0", "#6E6E76",
+                       "#47474E", "#2A2A30", "#1C1C22"],
     },
     "light": {
         "name": "浅色",
@@ -60,6 +65,8 @@ THEMES = {
         "primary_fg": "#FAFAFA",
         "primary_hover": "#3B3B40",
         "sel_bg": "#E3E3E7",
+        "pie_colors": ["#121214", "#414148", "#707078", "#9E9EA6",
+                       "#C6C6CC", "#DEDEE3", "#EDEDF0"],
     },
 }
 
@@ -81,6 +88,15 @@ def fmt_time(secs):
     if h:
         return f"{h}:{m:02d}:{s:02d}"
     return f"{m:02d}:{s:02d}"
+
+
+def contrast_fill(hex_color):
+    """根据色块亮度返回对比色（用于环形图上的百分比文字）。"""
+    r = int(hex_color[1:3], 16)
+    g = int(hex_color[3:5], 16)
+    b = int(hex_color[5:7], 16)
+    lum = 0.299 * r + 0.587 * g + 0.114 * b
+    return "#FFFFFF" if lum < 140 else "#000000"
 
 
 class PomodoroApp:
@@ -116,6 +132,11 @@ class PomodoroApp:
         self.focus_count_cycle = int(cfg.get("cycle_count", 0) or 0)
         self.today = date.today()
 
+        # 当前关联的待办任务
+        self.selected_todo_id = None
+        self.todo_var = tk.StringVar(value="（暂无待办）")
+        self.selector_items = []             # [(todo_id, 显示文本)]
+
         # 需要随主题重绘的控件集合
         self.frames = []
         self.labels = []
@@ -137,11 +158,14 @@ class PomodoroApp:
         self.update_status_default()
         self.update_controls()
         self.update_seg_labels()
+        self.refresh_todo_selector()
+        self.update_task_label()
         self.refresh_todos()
         self.refresh_stats()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.bind("<space>", self.on_space)
+        self.root.bind("<Control-Return>", self.on_complete_key)
         self.root.after(200, self.tick)
 
     # ---------------- 数据读写 ----------------
@@ -271,11 +295,24 @@ class PomodoroApp:
             lbl.bind("<Button-1>", lambda e, p=ph: self.switch_phase(p))
             self.seg_widgets[ph] = (lbl, und)
 
+        # 待办任务选择器
+        sel = self._frame(frm)
+        sel.pack(pady=(4, 0))
+        self._label(sel, text="待办任务", font=(FONT_UI, 10)).pack(side="left", padx=(0, 10))
+        self.todo_menu = tk.OptionMenu(sel, self.todo_var, "（暂无待办）")
+        self.todo_menu.configure(
+            font=(FONT_UI, 10), relief="flat", bd=0, highlightthickness=1,
+            anchor="w", width=22, cursor="hand2",
+        )
+        self.todo_menu.pack(side="left")
+        self.new_todo_btn = self._btn_text(sel, text="＋ 新建", command=self.goto_new_todo, font_size=10)
+        self.new_todo_btn.pack(side="left", padx=(10, 0))
+
         # 环形进度 + 时间
-        self.ring = tk.Canvas(frm, width=340, height=330, highlightthickness=0)
+        self.ring = tk.Canvas(frm, width=330, height=300, highlightthickness=0)
         self.canvases.append(self.ring)
-        self.ring.pack(pady=(6, 0))
-        self.cx, self.cy, self.r = 170, 164, 130
+        self.ring.pack(pady=(4, 0))
+        self.cx, self.cy, self.r = 165, 150, 115
         self.track_id = self.ring.create_oval(
             self.cx - self.r, self.cy - self.r, self.cx + self.r, self.cy + self.r,
             width=7, fill="",
@@ -284,29 +321,32 @@ class PomodoroApp:
             self.cx - self.r, self.cy - self.r, self.cx + self.r, self.cy + self.r,
             start=-90, extent=0, style=tk.ARC, width=7,
         )
-        self.time_id = self.ring.create_text(self.cx, self.cy - 14, text="25:00", font=(FONT_TIME, 54))
-        self.phase_id = self.ring.create_text(self.cx, self.cy + 44, text="专注", font=(FONT_UI, 12))
+        self.time_id = self.ring.create_text(self.cx, self.cy - 12, text="25:00", font=(FONT_TIME, 50))
+        self.phase_id = self.ring.create_text(self.cx, self.cy + 34, text="专注", font=(FONT_UI, 12))
+        self.task_id = self.ring.create_text(self.cx, self.cy + 60, text="未选择任务", font=(FONT_UI, 9))
 
         # 本轮进度
         self.cycle_lbl = self._label(frm, text="", font=(FONT_UI, 10))
-        self.cycle_lbl.pack(pady=(2, 0))
+        self.cycle_lbl.pack(pady=(1, 0))
         # 状态提示
         self.status_lbl = self._label(frm, text="", font=(FONT_UI, 10))
-        self.status_lbl.pack(pady=(2, 0))
+        self.status_lbl.pack(pady=(1, 0))
 
         # 控制按钮
         ctl = self._frame(frm)
-        ctl.pack(pady=(12, 0))
+        ctl.pack(pady=(8, 0))
         self.main_btn = self._btn_primary(ctl, text="开始", command=self.toggle_start_pause)
         self.main_btn.pack(side="left")
         self.reset_btn = self._btn_text(ctl, text="重置", command=self.reset_timer)
         self.reset_btn.pack(side="left", padx=(14, 0))
         self.skip_btn = self._btn_text(ctl, text="跳过", command=self.skip_phase)
         self.skip_btn.pack(side="left", padx=(8, 0))
+        self.done_task_btn = self._btn_text(ctl, text="✓ 完成待办", command=self.complete_todo)
+        self.done_task_btn.pack(side="left", padx=(16, 0))
 
         # 时长调整
         dur = self._frame(frm)
-        dur.pack(pady=(18, 0))
+        dur.pack(pady=(14, 0))
         self.steppers = {}
         for i, ph in enumerate(PHASE_ORDER):
             cell = self._frame(dur)
@@ -320,7 +360,7 @@ class PomodoroApp:
             plus.pack(side="left")
             self.steppers[ph] = (minus, val, plus)
 
-        hint = self._label(frm, text="空格键 开始 / 暂停", font=(FONT_UI, 9))
+        hint = self._label(frm, text="空格 开始/暂停 · Ctrl+Enter 完成待办", font=(FONT_UI, 9))
         hint.pack(side="bottom", pady=(6, 0))
 
     def build_todo_tab(self):
@@ -359,20 +399,28 @@ class PomodoroApp:
         self.clear_btn = self._btn_text(ops, text="清空已完成", command=self.clear_done)
         self.clear_btn.pack(side="left")
 
-        hint = self._label(frm, text="双击条目切换完成状态", font=(FONT_UI, 9))
+        hint = self._label(frm, text="双击条目切换完成状态 · 列表右侧显示累计专注时长", font=(FONT_UI, 9))
         hint.pack(side="bottom", pady=(6, 0))
 
     def build_stats_tab(self):
         frm = self.stats_tab
         self.summary_lbl = self._label(frm, text="", font=(FONT_UI, 12))
-        self.summary_lbl.pack(anchor="w", pady=(14, 4))
-        self.chart = tk.Canvas(frm, width=420, height=250, highlightthickness=0)
+        self.summary_lbl.pack(anchor="w", pady=(14, 2))
+        self.chart = tk.Canvas(frm, width=420, height=200, highlightthickness=0)
         self.canvases.append(self.chart)
-        self.chart.pack(fill="x", pady=(4, 0))
+        self.chart.pack(fill="x", pady=(0, 0))
         self.chart.bind("<Configure>", lambda e: self.draw_chart())
         cap = self._label(frm, text="近 7 天专注时长（分钟）", font=(FONT_UI, 10))
-        cap.pack(anchor="w", pady=(6, 0))
-        hint = self._label(frm, text="每完成一个完整的专注周期会自动记录", font=(FONT_UI, 9))
+        cap.pack(anchor="w", pady=(4, 0))
+
+        self.pie_canvas = tk.Canvas(frm, width=420, height=180, highlightthickness=0)
+        self.canvases.append(self.pie_canvas)
+        self.pie_canvas.pack(fill="x", pady=(6, 0))
+        self.pie_canvas.bind("<Configure>", lambda e: self.draw_pie())
+        cap2 = self._label(frm, text="每项任务专注时长分布", font=(FONT_UI, 10))
+        cap2.pack(anchor="w", pady=(4, 0))
+
+        hint = self._label(frm, text="专注完整结束或手动「完成待办」时自动记录", font=(FONT_UI, 9))
         hint.pack(side="bottom", pady=(6, 0))
 
     # ---------------- 主题 ----------------
@@ -394,10 +442,11 @@ class PomodoroApp:
             l.configure(bg=pal["bg"], fg=pal["text"])
         for b in self.primary_btns:
             b.configure(bg=pal["primary_bg"], fg=pal["primary_fg"],
-                        activebackground=pal["primary_hover"], activeforeground=pal["primary_fg"])
+                        activebackground=pal["primary_hover"], activeforeground=pal["primary_fg"],
+                        disabledforeground=pal["faint"])
         for b in self.text_btns:
             b.configure(bg=pal["bg"], fg=pal["muted"], activebackground=pal["bg"],
-                        activeforeground=pal["text"])
+                        activeforeground=pal["text"], disabledforeground=pal["faint"])
         for e in self.entries:
             e.configure(bg=pal["surface"], fg=pal["text"], insertbackground=pal["text"],
                         highlightbackground=pal["line"], highlightcolor=pal["line"])
@@ -410,6 +459,14 @@ class PomodoroApp:
         for c in self.canvases:
             c.configure(bg=pal["bg"], highlightbackground=pal["bg"])
 
+        # 待办选择下拉框
+        self.todo_menu.configure(bg=pal["surface"], fg=pal["text"],
+                                 activebackground=pal["sel_bg"], activeforeground=pal["text"],
+                                 highlightbackground=pal["line"], highlightcolor=pal["line"])
+        self.todo_menu["menu"].configure(bg=pal["surface"], fg=pal["text"],
+                                         activebackground=pal["sel_bg"], activeforeground=pal["text"],
+                                         bd=0, tearoff=0, font=(FONT_UI, 10))
+
         self.theme_btn.configure(text="◐ " + pal["name"])
         self.cycle_lbl.configure(fg=pal["muted"])
         self.date_lbl.configure(fg=pal["muted"])
@@ -419,9 +476,11 @@ class PomodoroApp:
         self.ring.itemconfig(self.arc_id, outline=pal["text"])
         self.ring.itemconfig(self.time_id, fill=pal["text"])
         self.ring.itemconfig(self.phase_id, fill=pal["muted"])
+        self.ring.itemconfig(self.task_id, fill=pal["muted"])
 
         self.update_tab_colors()
         self.draw_chart()
+        self.draw_pie()
 
     def update_tab_colors(self):
         pal = self.pal
@@ -447,6 +506,53 @@ class PomodoroApp:
             self.refresh_stats()
         self.update_tab_colors()
 
+    # ---------------- 待办任务选择 ----------------
+    def goto_new_todo(self):
+        self.show_tab("todo")
+        self.todo_entry.focus_set()
+
+    def display_of(self, tid):
+        for i, d in self.selector_items:
+            if i == tid:
+                return d
+        return None
+
+    def pick_todo(self, display):
+        for tid, d in self.selector_items:
+            if d == display:
+                self.selected_todo_id = tid
+                break
+        self.todo_var.set(display)
+        self.update_task_label()
+        if not self.running and not self.paused:
+            self.status_lbl.configure(text=self.status_text(self.phase))
+
+    def refresh_todo_selector(self):
+        menu = self.todo_menu["menu"]
+        menu.delete(0, "end")
+        unfinished = [t for t in self.data["todos"] if not t["done"]]
+        self.selector_items = [(t["id"], t["text"]) for t in unfinished]
+        if not unfinished:
+            self.todo_var.set("（暂无待办，请先创建）")
+            self.selected_todo_id = None
+            self.update_task_label()
+            return
+        for tid, disp in self.selector_items:
+            menu.add_command(label=disp, command=lambda d=disp: self.pick_todo(d))
+        cur = self.selected_todo_id
+        if cur and any(i == cur for i, _ in self.selector_items):
+            self.todo_var.set(self.display_of(cur))
+        elif not (self.running or self.paused):
+            self.pick_todo(self.selector_items[0][1])
+        else:
+            self.selected_todo_id = None
+            self.todo_var.set("（任务已删除）")
+        self.update_task_label()
+
+    def update_task_label(self):
+        text = self.display_of(self.selected_todo_id) if self.selected_todo_id else ""
+        self.ring.itemconfig(self.task_id, text=text if text else "未选择任务")
+
     # ---------------- 计时核心 ----------------
     def current_elapsed(self):
         if not (self.running or self.paused):
@@ -466,11 +572,18 @@ class PomodoroApp:
     def start_timer(self):
         if self.running or self.paused:
             return
+        if self.phase == "focus" and self.selected_todo_id is None:
+            self.status_lbl.configure(text="请先选择一项待办任务再开始专注")
+            return
         self.accumulated = 0.0
         self.run_start = time.monotonic()
         self.running = True
         self.paused = False
-        self.status_lbl.configure(text=self.status_text(self.phase))
+        if self.phase == "focus":
+            task = self.display_of(self.selected_todo_id)
+            self.status_lbl.configure(text=f"专注中 · {task}" if task else "专注中")
+        else:
+            self.status_lbl.configure(text=self.status_text(self.phase))
         self.update_controls()
 
     def pause_timer(self):
@@ -539,7 +652,11 @@ class PomodoroApp:
 
         kind = PHASE_KIND[self.phase]
         if kind == "focus":
-            self.record_focus()
+            # 记录本次完整专注到关联待办
+            todo = next((t for t in self.data["todos"] if t["id"] == self.selected_todo_id), None)
+            if todo is not None:
+                self.record_focus(self.durations["focus"] * 60, todo)
+                self.save_data()
             self.focus_count_cycle += 1
             if self.focus_count_cycle % 4 == 0:
                 nxt = "long"
@@ -563,18 +680,56 @@ class PomodoroApp:
         self.update_controls()
         self.refresh_stats()
 
-    def record_focus(self):
+    def complete_todo(self):
+        """手动完成当前待办：停止计时、记录已用时长、将任务标记为完成。"""
+        if self.phase != "focus":
+            self.status_lbl.configure(text="休息时间不计入任务时长")
+            return
+        if self.selected_todo_id is None:
+            self.status_lbl.configure(text="请先选择一项待办任务")
+            return
+        todo = next((t for t in self.data["todos"] if t["id"] == self.selected_todo_id), None)
+        if todo is None:
+            self.status_lbl.configure(text="所选任务已不存在")
+            return
+        if not self.running and not self.paused:
+            self.status_lbl.configure(text="计时未开始，无法完成")
+            return
+
+        secs = int(round(self.current_elapsed()))
+        self.running = False
+        self.paused = False
+        self.accumulated = 0.0
+        if secs >= 1:
+            self.record_focus(secs, todo)
+        todo["done"] = True
+        todo["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        self.save_data()
+        self.status_lbl.configure(
+            text=f"已完成「{todo['text']}」 · 本次 {secs // 60} 分 {secs % 60} 秒"
+        )
+        self.selected_todo_id = None
+        self.refresh_todo_selector()
+        self.refresh_todos()
+        self.update_ring_display(self.durations[self.phase] * 60)
+        self.update_controls()
+        self.refresh_stats()
+
+    def record_focus(self, seconds, todo):
         end = datetime.now()
-        start = end - timedelta(seconds=self.durations["focus"] * 60)
+        start = end - timedelta(seconds=seconds)
         session = {
             "id": str(uuid.uuid4())[:8],
             "phase": "focus",
-            "seconds": self.durations["focus"] * 60,
+            "seconds": seconds,
+            "todo_id": todo["id"],
+            "todo_text": todo["text"],
             "start_time": start.strftime("%Y-%m-%d %H:%M:%S"),
             "end_time": end.strftime("%Y-%m-%d %H:%M:%S"),
             "date": start.strftime("%Y-%m-%d"),
         }
         self.data["sessions"].append(session)
+        todo["seconds"] = todo.get("seconds", 0) + seconds
 
     def beep(self):
         if winsound:
@@ -615,6 +770,9 @@ class PomodoroApp:
             minus, _, plus = self.steppers[ph]
             minus.configure(state=state)
             plus.configure(state=state)
+        can_complete = (self.phase == "focus" and self.selected_todo_id is not None
+                        and (self.running or self.paused))
+        self.done_task_btn.configure(state="normal" if can_complete else "disabled")
 
     def status_text(self, ph):
         d = self.durations[ph]
@@ -671,6 +829,12 @@ class PomodoroApp:
             return
         self.toggle_start_pause()
 
+    def on_complete_key(self, _event):
+        w = self.root.focus_get()
+        if isinstance(w, (tk.Entry, tk.Listbox)):
+            return
+        self.complete_todo()
+
     # ---------------- 待办事项 ----------------
     def add_todo(self):
         text = self.todo_entry.get().strip()
@@ -680,11 +844,14 @@ class PomodoroApp:
             "id": str(uuid.uuid4())[:8],
             "text": text,
             "done": False,
+            "seconds": 0,
             "created_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "completed_at": None,
         })
         self.save_data()
         self.todo_entry.delete(0, "end")
         self.refresh_todos()
+        self.refresh_todo_selector()
         self.todo_entry.focus_set()
 
     def selected_todo_index(self):
@@ -697,8 +864,11 @@ class PomodoroApp:
             return
         todo = self.data["todos"][idx]
         todo["done"] = not todo["done"]
+        if todo["done"]:
+            todo["completed_at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
         self.save_data()
         self.refresh_todos()
+        self.refresh_todo_selector()
         if idx < self.todo_list.size():
             self.todo_list.selection_set(idx)
 
@@ -709,17 +879,21 @@ class PomodoroApp:
         del self.data["todos"][idx]
         self.save_data()
         self.refresh_todos()
+        self.refresh_todo_selector()
 
     def clear_done(self):
         self.data["todos"] = [t for t in self.data["todos"] if not t["done"]]
         self.save_data()
         self.refresh_todos()
+        self.refresh_todo_selector()
 
     def refresh_todos(self):
         self.todo_list.delete(0, "end")
         for todo in self.data["todos"]:
             mark = "✓ " if todo["done"] else "   "
-            self.todo_list.insert("end", mark + todo["text"])
+            mins = todo.get("seconds", 0) // 60
+            suffix = f"   ·   {mins} 分钟" if mins > 0 else ""
+            self.todo_list.insert("end", mark + todo["text"] + suffix)
 
     # ---------------- 统计 ----------------
     def refresh_stats(self):
@@ -734,6 +908,7 @@ class PomodoroApp:
                  f"累计  {total_count} 个番茄 · {total_seconds // 3600} 小时 {total_seconds % 3600 // 60} 分钟"
         )
         self.draw_chart()
+        self.draw_pie()
 
     def draw_chart(self):
         c = self.chart
@@ -744,9 +919,9 @@ class PomodoroApp:
         if tw < 60:
             tw = 420
         if th < 60:
-            th = 250
+            th = 200
 
-        pad_l, pad_r, pad_t, pad_b = 10, 10, 26, 30
+        pad_l, pad_r, pad_t, pad_b = 10, 10, 22, 28
         inner_w = tw - pad_l - pad_r
         inner_h = th - pad_t - pad_b
 
@@ -764,14 +939,77 @@ class PomodoroApp:
         for i, (d, v) in enumerate(zip(days, vals)):
             x0 = pad_l + slot * i + slot * 0.24
             x1 = pad_l + slot * (i + 1) - slot * 0.24
-            bar_h = (v / mx) * (inner_h - 16) if v > 0 else 2.5
+            bar_h = (v / mx) * (inner_h - 14) if v > 0 else 2.5
             fill = pal["text"] if i == 6 else pal["faint"]
             c.create_rectangle(x0, base_y - bar_h, x1, base_y, fill=fill, outline="")
             if v > 0:
-                c.create_text((x0 + x1) / 2, base_y - bar_h - 9, text=f"{v:.0f}",
+                c.create_text((x0 + x1) / 2, base_y - bar_h - 8, text=f"{v:.0f}",
                               fill=pal["muted"], font=(FONT_UI, 8))
-            c.create_text((x0 + x1) / 2, base_y + 14, text=d.strftime("%m-%d"),
+            c.create_text((x0 + x1) / 2, base_y + 13, text=d.strftime("%m-%d"),
                           fill=pal["text"] if i == 6 else pal["muted"], font=(FONT_UI, 8))
+
+    def draw_pie(self):
+        c = self.pie_canvas
+        c.delete("all")
+        pal = self.pal
+        tw = c.winfo_width()
+        th = c.winfo_height()
+        if tw < 60:
+            tw = 420
+        if th < 60:
+            th = 180
+
+        agg = defaultdict(int)
+        for s in self.data["sessions"]:
+            name = s.get("todo_text") or "未命名任务"
+            agg[name] += s.get("seconds", 0)
+        total = sum(agg.values())
+        if not agg or total <= 0:
+            c.create_text(tw // 2, th // 2, text="暂无任务时长数据",
+                          fill=pal["muted"], font=(FONT_UI, 10))
+            return
+
+        items = sorted(agg.items(), key=lambda kv: -kv[1])
+        top = items[:6]
+        rest = sum(v for _, v in items[6:])
+        if rest > 0:
+            top.append(("其他", rest))
+        colors = pal["pie_colors"]
+
+        cx, cy, r_out, r_in = 90, th // 2, 64, 34
+        start = 90.0
+        for i, (name, v) in enumerate(top):
+            ext = -360.0 * v / total
+            c.create_arc(cx - r_out, cy - r_out, cx + r_out, cy + r_out,
+                         start=start, extent=ext, style=tk.PIESLICE,
+                         fill=colors[i % len(colors)], outline=pal["bg"])
+            if abs(ext) >= 10:
+                mid = math.radians(start + ext / 2)
+                lx = cx + math.cos(mid) * (r_out + r_in) / 2
+                ly = cy - math.sin(mid) * (r_out + r_in) / 2
+                pct = int(round(100.0 * v / total))
+                c.create_text(lx, ly, text=f"{pct}%",
+                              fill=contrast_fill(colors[i % len(colors)]),
+                              font=(FONT_UI, 8, "bold"))
+            start += ext
+
+        # 中心挖空成环形，并显示总时长
+        c.create_oval(cx - r_in, cy - r_in, cx + r_in, cy + r_in,
+                      fill=pal["bg"], outline=pal["bg"])
+        c.create_text(cx, cy - 4, text=f"{total // 60}", fill=pal["text"],
+                      font=(FONT_UI, 13, "bold"))
+        c.create_text(cx, cy + 14, text="分钟", fill=pal["muted"], font=(FONT_UI, 8))
+
+        # 右侧图例
+        lx = cx + r_out + 22
+        ly = cy - r_out
+        for i, (name, v) in enumerate(top):
+            yy = ly + i * 17
+            c.create_rectangle(lx, yy, lx + 10, yy + 10,
+                               fill=colors[i % len(colors)], outline="")
+            label = name if len(name) <= 9 else name[:9] + "…"
+            c.create_text(lx + 16, yy + 5, text=f"{label} · {v // 60} 分", anchor="w",
+                          fill=pal["text"], font=(FONT_UI, 9))
 
     # ---------------- 退出 ----------------
     def on_close(self):

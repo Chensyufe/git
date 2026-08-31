@@ -1,0 +1,43 @@
+{
+  "sessions": [
+    {
+      "id": "6f4c9cfd",
+      "phase": "focus",
+      "seconds": 53,
+      "todo_id": "be8b9dbe",
+      "todo_text": "1",
+      "start_time": "2026-08-31 14:20:18",
+      "end_time": "2026-08-31 14:21:11",
+      "date": "2026-08-31"
+    }
+  ],
+  "todos": [
+    {
+      "id": "be8b9dbe",
+      "text": "1",
+      "done": false,
+      "seconds": 53,
+      "created_at": "2026-08-31 14:18",
+      "completed_at": "2026-08-31 14:21"
+    },
+    {
+      "id": "ea28d06b",
+      "text": "2",
+      "done": false,
+      "seconds": 0,
+      "created_at": "2026-08-31 14:18",
+      "completed_at": "2026-08-31 14:22"
+    },
+    {
+      "id": "ddb2acce",
+      "text": "3",
+      "done": false,
+      "seconds": 0,
+      "created_at": "2026-08-31 14:18",
+      "completed_at": "2026-08-31 14:22"
+    }
+  ],
+  "config": {
+    "theme": "light"
+  }
+}
